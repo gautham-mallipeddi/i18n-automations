@@ -1,0 +1,26 @@
+name: Update Version
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - main
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+
+      - name: Update Version
+        run: |
+          echo "version: ${{ github.event.pull_request.number }}" >> version.txt
+          git config --global user.email "gautham.mallipeddi8@gmail.com"
+          git config --global user.name "gautham-8"
+          git add version.txt
+          git commit -m "Update version to ${{ github.event.pull_request.number }}"
+          git push
