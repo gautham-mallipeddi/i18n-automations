@@ -6,7 +6,7 @@ permissions:
   pull-requests: write
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
@@ -23,20 +23,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
 
-      - name: Check if last commit has [skip ci]
-        id: check_commit
-        run: |
-          LAST_COMMIT_MSG=$(git log -1 --pretty=format:'%s')
-          if [[ "$LAST_COMMIT_MSG" == *"[skip ci]"* ]]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "Last commit contains [skip ci], skipping workflow..."
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-            echo "Last commit: $LAST_COMMIT_MSG"
-          fi
-
       - name: Update Version
-        if: steps.check_commit.outputs.skip == 'false'
         run: |
           echo "version: ${{ github.event.pull_request.number }}" >> version.txt
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
