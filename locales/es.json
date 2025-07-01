@@ -1,3 +1,5 @@
 {
-    "Priority": "Prioridad"
+  "Priority": "Priority",
+  "Status": "Status",
+  "Add a new todo": "Add a new todo"
 }
