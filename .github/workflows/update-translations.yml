@@ -220,8 +220,8 @@ jobs:
       - name: Commit changes
         if: steps.changes.outputs.has-changes == 'true'
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
           git commit -m "Auto-translate locale files
 
           - Updated translations based on changes to en.json
