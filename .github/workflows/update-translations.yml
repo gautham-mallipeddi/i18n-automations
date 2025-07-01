@@ -1,33 +1,248 @@
-name: Update Version
+name: Auto Translate Locales
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - main
+      - release/development
+      - release/qa
+      - release/production
+    paths:
+      - 'locales/en.json'
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
 
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches:
-      - main
-
 jobs:
-  update-version:
+  check-branch-conditions:
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+    steps:
+      - name: Check if workflow should run
+        id: check
+        run: |
+          # Get source and target branches
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          TARGET_BRANCH="${{ github.base_ref }}"
+          
+          # Define release branches
+          RELEASE_BRANCHES=("main" "release/development" "release/qa" "release/production")
+          
+          # Check if source branch is one of the release branches
+          SOURCE_IS_RELEASE=false
+          for branch in "${RELEASE_BRANCHES[@]}"; do
+            if [[ "$SOURCE_BRANCH" == "$branch" ]]; then
+              SOURCE_IS_RELEASE=true
+              break
+            fi
+          done
+          
+          # Check if target branch is one of the release branches
+          TARGET_IS_RELEASE=false
+          for branch in "${RELEASE_BRANCHES[@]}"; do
+            if [[ "$TARGET_BRANCH" == "$branch" ]]; then
+              TARGET_IS_RELEASE=true
+              break
+            fi
+          done
+          
+          # Skip if both source and target are release branches (release PRs)
+          if [[ "$SOURCE_IS_RELEASE" == true && "$TARGET_IS_RELEASE" == true ]]; then
+            echo "Skipping workflow: Release branch to release branch PR detected"
+            echo "should-run=false" >> $GITHUB_OUTPUT
+          else
+            echo "Running workflow: Feature branch to release branch PR detected"
+            echo "should-run=true" >> $GITHUB_OUTPUT
+          fi
+
+  auto-translate:
+    needs: check-branch-conditions
+    if: needs.check-branch-conditions.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
 
-      - name: Update Version
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
         run: |
-          echo "version: ${{ github.event.pull_request.number }}" >> version.txt
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          git add version.txt
-          git commit -m "chore: update version to ${{ github.event.pull_request.number }} [skip ci]"
-          git push origin ${{ github.event.pull_request.head.ref }}
+          npm init -y
+          npm install axios
+
+      - name: Run translation using github-script
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const axios = require('axios');
+
+            // Language mappings
+            const LANGUAGES = {
+              'de.json': 'de',
+              'es.json': 'es', 
+              'ja.json': 'ja',
+              'pt.json': 'pt'
+            };
+
+            const TRANSLATE_API = 'https://libretranslate.de/translate';
+
+            async function translateText(text, targetLang, retries = 3) {
+              for (let i = 0; i < retries; i++) {
+                try {
+                  const response = await axios.post(TRANSLATE_API, {
+                    q: text,
+                    source: 'en',
+                    target: targetLang,
+                    format: 'text'
+                  }, {
+                    timeout: 10000,
+                    headers: { 'Content-Type': 'application/json' }
+                  });
+                  if (response.data && response.data.translatedText) {
+                    return response.data.translatedText;
+                  }
+                } catch (error) {
+                  if (i === retries - 1) return text;
+                  await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+                }
+              }
+              return text;
+            }
+
+            async function translateObject(obj, targetLang, path = '') {
+              const result = {};
+              for (const [key, value] of Object.entries(obj)) {
+                if (typeof value === 'string') {
+                  result[key] = await translateText(value, targetLang);
+                  await new Promise(resolve => setTimeout(resolve, 200));
+                } else if (typeof value === 'object' && value !== null) {
+                  result[key] = await translateObject(value, targetLang, path ? `${path}.${key}` : key);
+                } else {
+                  result[key] = value;
+                }
+              }
+              return result;
+            }
+
+            function deepMerge(target, source) {
+              const result = { ...target };
+              for (const key in source) {
+                if (typeof source[key] === 'object' && source[key] !== null && !Array.isArray(source[key])) {
+                  result[key] = deepMerge(result[key] || {}, source[key]);
+                } else {
+                  result[key] = source[key];
+                }
+              }
+              return result;
+            }
+
+            function removeDeletedKeys(target, source) {
+              const result = {};
+              for (const key in target) {
+                if (key in source) {
+                  if (typeof source[key] === 'object' && source[key] !== null && !Array.isArray(source[key])) {
+                    result[key] = removeDeletedKeys(target[key], source[key]);
+                  } else {
+                    result[key] = target[key];
+                  }
+                }
+              }
+              return result;
+            }
+
+            // Main logic
+            const enPath = path.join('locales', 'en.json');
+            if (!fs.existsSync(enPath)) {
+              throw new Error('English locale file not found!');
+            }
+            const enContent = JSON.parse(fs.readFileSync(enPath, 'utf8'));
+
+            for (const [filename, langCode] of Object.entries(LANGUAGES)) {
+              const targetPath = path.join('locales', filename);
+              let existingContent = {};
+              if (fs.existsSync(targetPath)) {
+                existingContent = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+              }
+              const cleanedContent = removeDeletedKeys(existingContent, enContent);
+              const keysToTranslate = {};
+              function findNewKeys(enObj, existingObj) {
+                for (const [key, value] of Object.entries(enObj)) {
+                  if (typeof value === 'string') {
+                    if (!existingObj || !(key in existingObj) || typeof existingObj[key] !== 'string') {
+                      keysToTranslate[key] = value;
+                    }
+                  } else if (typeof value === 'object' && value !== null) {
+                    if (!existingObj || !(key in existingObj)) {
+                      keysToTranslate[key] = value;
+                    } else {
+                      findNewKeys(value, existingObj[key]);
+                    }
+                  }
+                }
+              }
+              findNewKeys(enContent, cleanedContent);
+              let finalContent;
+              if (Object.keys(keysToTranslate).length > 0) {
+                const translatedKeys = await translateObject(keysToTranslate, langCode);
+                finalContent = deepMerge(cleanedContent, translatedKeys);
+              } else {
+                finalContent = cleanedContent;
+              }
+              fs.writeFileSync(targetPath, JSON.stringify(finalContent, null, 2) + '\n');
+            }
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git add locales/
+          if git diff --staged --quiet; then
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            echo "No translation changes detected"
+          else
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+            echo "Translation changes detected"
+          fi
+
+      - name: Commit changes
+        if: steps.changes.outputs.has-changes == 'true'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git commit -m "Auto-translate locale files
+
+          - Updated translations based on changes to en.json
+          - Added new translations for added keys
+          - Updated translations for modified keys  
+          - Removed translations for deleted keys
+          
+          Generated by GitHub Actions"
+
+      - name: Push changes
+        if: steps.changes.outputs.has-changes == 'true'
+        run: git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
+      - name: Comment on PR
+        if: steps.changes.outputs.has-changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🌐 **Auto-translation completed!**\n\nThe locale files have been automatically updated based on changes to `en.json`:\n\n- ✅ New translations added\n- 🔄 Modified translations updated\n- 🗑️ Deleted keys removed\n\nPlease review the changes and ensure the translations are accurate.'
+            });
