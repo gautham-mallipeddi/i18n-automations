@@ -63,6 +63,22 @@ jobs:
     needs: check-branch-conditions
     if: needs.check-branch-conditions.outputs.should-run == 'true'
     runs-on: ubuntu-latest
+    
+    services:
+      libretranslate:
+        image: libretranslate/libretranslate:latest
+        ports:
+          - 5000:5000
+        env:
+          LT_LOAD_ONLY: en,de,es,ja,pt
+          LT_THREADS: 2
+        options: >-
+          --health-cmd "curl -f http://localhost:5000/health || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 120s
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -82,6 +98,19 @@ jobs:
           npm init -y
           npm install axios
 
+      - name: Wait for LibreTranslate to be ready
+        run: |
+          echo "Waiting for LibreTranslate to be ready..."
+          timeout 300 bash -c 'until curl -f http://localhost:5000/health; do echo "Still waiting..."; sleep 10; done'
+          echo "LibreTranslate is ready!"
+          
+          # Test a simple translation to make sure it's working
+          echo "Testing translation service..."
+          curl -X POST "http://localhost:5000/translate" \
+            -H "Content-Type: application/json" \
+            -d '{"q": "Hello", "source": "en", "target": "es"}' \
+            --max-time 30 || echo "Translation test failed, but continuing..."
+
       - name: Run translation using github-script
         uses: actions/github-script@v7
         with:
@@ -98,27 +127,41 @@ jobs:
               'pt.json': 'pt'
             };
 
-            const TRANSLATE_API = 'https://libretranslate.de/translate';
+            // Use local LibreTranslate instance
+            const TRANSLATE_API = 'http://localhost:5000/translate';
 
             async function translateText(text, targetLang, retries = 3) {
               for (let i = 0; i < retries; i++) {
                 try {
+                  console.log(`Translating "${text}" to ${targetLang} (attempt ${i + 1})`);
                   const response = await axios.post(TRANSLATE_API, {
                     q: text,
                     source: 'en',
                     target: targetLang,
                     format: 'text'
                   }, {
-                    timeout: 10000,
+                    timeout: 30000,
                     headers: { 'Content-Type': 'application/json' }
                   });
+                  
                   if (response.data && response.data.translatedText) {
+                    console.log(`Translation successful: "${response.data.translatedText}"`);
                     return response.data.translatedText;
+                  } else {
+                    console.log(`Invalid response format:`, response.data);
                   }
                 } catch (error) {
                   console.log(`Translation attempt ${i + 1} failed for "${text}":`, error.message);
-                  if (i === retries - 1) return text;
-                  await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+                  if (error.response) {
+                    console.log(`Response status: ${error.response.status}`);
+                    console.log(`Response data:`, error.response.data);
+                  }
+                  if (i === retries - 1) {
+                    console.log(`All translation attempts failed for "${text}", keeping original text`);
+                    return text;
+                  }
+                  // Exponential backoff
+                  await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
                 }
               }
               return text;
@@ -130,7 +173,8 @@ jobs:
                 if (typeof value === 'string') {
                   console.log(`Translating: ${path ? path + '.' : ''}${key} = "${value}"`);
                   result[key] = await translateText(value, targetLang);
-                  await new Promise(resolve => setTimeout(resolve, 200));
+                  // Rate limiting between translations
+                  await new Promise(resolve => setTimeout(resolve, 500));
                 } else if (typeof value === 'object' && value !== null) {
                   result[key] = await translateObject(value, targetLang, path ? `${path}.${key}` : key);
                 } else {
