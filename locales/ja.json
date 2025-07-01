@@ -1,3 +1,5 @@
 {
-    "Priority": "優先度"
+  "Priority": "優先度",
+  "Status": "Status",
+  "Add a new todo": "Add a new todo"
 }
