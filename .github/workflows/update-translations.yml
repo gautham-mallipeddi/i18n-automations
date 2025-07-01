@@ -116,6 +116,7 @@ jobs:
                     return response.data.translatedText;
                   }
                 } catch (error) {
+                  console.log(`Translation attempt ${i + 1} failed for "${text}":`, error.message);
                   if (i === retries - 1) return text;
                   await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
                 }
@@ -127,6 +128,7 @@ jobs:
               const result = {};
               for (const [key, value] of Object.entries(obj)) {
                 if (typeof value === 'string') {
+                  console.log(`Translating: ${path ? path + '.' : ''}${key} = "${value}"`);
                   result[key] = await translateText(value, targetLang);
                   await new Promise(resolve => setTimeout(resolve, 200));
                 } else if (typeof value === 'object' && value !== null) {
@@ -164,49 +166,115 @@ jobs:
               return result;
             }
 
+            // Get the changed keys from the current PR
+            async function getChangedKeys() {
+              try {
+                const { data: files } = await github.rest.pulls.listFiles({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                });
+
+                const enFile = files.find(file => file.filename === 'locales/en.json');
+                if (!enFile || enFile.status === 'removed') {
+                  return new Set();
+                }
+
+                const changedKeys = new Set();
+                
+                // Parse the patch to find changed keys
+                const patch = enFile.patch || '';
+                const addedLines = patch.split('\n').filter(line => line.startsWith('+') && !line.startsWith('+++'));
+                
+                for (const line of addedLines) {
+                  // Remove the '+' prefix and trim
+                  const content = line.substring(1).trim();
+                  // Match JSON key-value pairs: "key": "value"
+                  const keyMatch = content.match(/^"([^"]+)":\s*"[^"]*"[,]?$/);
+                  if (keyMatch) {
+                    changedKeys.add(keyMatch[1]);
+                  }
+                }
+
+                console.log('Changed keys detected:', Array.from(changedKeys));
+                return changedKeys;
+              } catch (error) {
+                console.log('Could not detect changed keys, will translate all new/missing keys:', error.message);
+                return new Set();
+              }
+            }
+
+            // Modified function to find keys that need translation
+            function findKeysToTranslate(enObj, existingObj, changedKeys, keyPath = '') {
+              const result = {};
+              for (const [key, value] of Object.entries(enObj)) {
+                const fullKey = keyPath ? `${keyPath}.${key}` : key;
+                
+                if (typeof value === 'string') {
+                  // Translate if: key is new, key was changed in PR, or existing translation is missing/empty
+                  const shouldTranslate = 
+                    !existingObj || 
+                    !(key in existingObj) || 
+                    typeof existingObj[key] !== 'string' ||
+                    existingObj[key] === '' ||
+                    existingObj[key] === value || // If target has same English value
+                    changedKeys.has(key) ||
+                    changedKeys.has(fullKey);
+                  
+                  if (shouldTranslate) {
+                    result[key] = value;
+                  }
+                } else if (typeof value === 'object' && value !== null) {
+                  if (!existingObj || !(key in existingObj)) {
+                    // Entire nested object is new
+                    result[key] = value;
+                  } else {
+                    // Recursively check nested object
+                    const nested = findKeysToTranslate(value, existingObj[key], changedKeys, fullKey);
+                    if (Object.keys(nested).length > 0) {
+                      result[key] = nested;
+                    }
+                  }
+                }
+              }
+              return result;
+            }
+
             // Main logic
             const enPath = path.join('locales', 'en.json');
             if (!fs.existsSync(enPath)) {
               throw new Error('English locale file not found!');
             }
             const enContent = JSON.parse(fs.readFileSync(enPath, 'utf8'));
+            
+            // Get changed keys from the PR
+            const changedKeys = await getChangedKeys();
 
             for (const [filename, langCode] of Object.entries(LANGUAGES)) {
+              console.log(`\nProcessing ${filename} (${langCode})...`);
+              
               const targetPath = path.join('locales', filename);
               let existingContent = {};
               if (fs.existsSync(targetPath)) {
                 existingContent = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
               }
+              
+              // Remove keys that no longer exist in English
               const cleanedContent = removeDeletedKeys(existingContent, enContent);
-              const keysToTranslate = {};
-              function findNewKeys(enObj, existingObj) {
-                const result = {};
-                for (const [key, value] of Object.entries(enObj)) {
-                  if (typeof value === 'string') {
-                    if (!existingObj || !(key in existingObj) || typeof existingObj[key] !== 'string') {
-                      result[key] = value;
-                    }
-                  } else if (typeof value === 'object' && value !== null) {
-                    if (!existingObj || !(key in existingObj)) {
-                      result[key] = value;
-                    } else {
-                      const nested = findNewKeys(value, existingObj[key]);
-                      if (Object.keys(nested).length > 0) {
-                        result[key] = nested;
-                      }
-                    }
-                  }
-                }
-                return result;
-              }
-              const newKeys = findNewKeys(enContent, cleanedContent);
+              
+              // Find keys that need translation
+              const keysToTranslate = findKeysToTranslate(enContent, cleanedContent, changedKeys);
+              
               let finalContent;
-              if (Object.keys(newKeys).length > 0) {
-                const translatedKeys = await translateObject(newKeys, langCode);
+              if (Object.keys(keysToTranslate).length > 0) {
+                console.log(`Found ${Object.keys(keysToTranslate).length} keys to translate for ${langCode}`);
+                const translatedKeys = await translateObject(keysToTranslate, langCode);
                 finalContent = deepMerge(cleanedContent, translatedKeys);
               } else {
+                console.log(`No new keys to translate for ${langCode}`);
                 finalContent = cleanedContent;
               }
+              
               fs.writeFileSync(targetPath, JSON.stringify(finalContent, null, 2) + '\n');
             }
 
