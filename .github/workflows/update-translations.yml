@@ -64,21 +64,6 @@ jobs:
     if: needs.check-branch-conditions.outputs.should-run == 'true'
     runs-on: ubuntu-latest
     
-    services:
-      libretranslate:
-        image: libretranslate/libretranslate:latest
-        ports:
-          - 5000:5000
-        env:
-          LT_LOAD_ONLY: en,de,es,ja,pt
-          LT_THREADS: 2
-        options: >-
-          --health-cmd "curl -f http://localhost:5000/health || exit 1"
-          --health-interval 30s
-          --health-timeout 10s
-          --health-retries 10
-          --health-start-period 120s
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -98,18 +83,53 @@ jobs:
           npm init -y
           npm install axios
 
-      - name: Wait for LibreTranslate to be ready
+      - name: Start LibreTranslate
         run: |
-          echo "Waiting for LibreTranslate to be ready..."
-          timeout 300 bash -c 'until curl -f http://localhost:5000/health; do echo "Still waiting..."; sleep 10; done'
-          echo "LibreTranslate is ready!"
+          echo "Starting LibreTranslate container..."
+          docker run -d \
+            --name libretranslate \
+            -p 5000:5000 \
+            -e LT_LOAD_ONLY=en,de,es,ja,pt \
+            -e LT_THREADS=2 \
+            libretranslate/libretranslate:latest
           
-          # Test a simple translation to make sure it's working
-          echo "Testing translation service..."
-          curl -X POST "http://localhost:5000/translate" \
+          echo "Container started, waiting for LibreTranslate to be ready..."
+          
+          # Wait for the service to be ready (up to 10 minutes)
+          timeout 600 bash -c '
+            while true; do
+              if curl -s -f http://localhost:5000/health > /dev/null 2>&1; then
+                echo "LibreTranslate health check passed!"
+                break
+              fi
+              
+              # Check if container is still running
+              if ! docker ps --filter "name=libretranslate" --format "table {{.Names}}" | grep -q libretranslate; then
+                echo "Container stopped unexpectedly!"
+                docker logs libretranslate
+                exit 1
+              fi
+              
+              echo "Waiting for LibreTranslate to be ready... ($(date))"
+              sleep 15
+            done
+          '
+          
+          echo "LibreTranslate is ready! Testing translation..."
+          
+          # Test translation
+          response=$(curl -s -X POST "http://localhost:5000/translate" \
             -H "Content-Type: application/json" \
             -d '{"q": "Hello", "source": "en", "target": "es"}' \
-            --max-time 30 || echo "Translation test failed, but continuing..."
+            --max-time 30)
+          
+          echo "Translation test response: $response"
+          
+          if echo "$response" | grep -q "translatedText"; then
+            echo "Translation service is working correctly!"
+          else
+            echo "Translation test failed, but continuing..."
+          fi
 
       - name: Run translation using github-script
         uses: actions/github-script@v7
